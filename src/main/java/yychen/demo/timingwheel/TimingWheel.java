@@ -9,80 +9,107 @@ import java.util.concurrent.atomic.AtomicLong;
  * 时间轮的实现
  */
 public class TimingWheel {
-    //每一个格子的延迟时间
+
+    /**
+     * 一个时间槽的范围
+     */
     private long tickMs;
-    //总共有多少个格子
+
+    /**
+     * 时间轮大小
+     */
     private int wheelSize;
-    //当前时间轮的创建时间
-    private long startMs;
-    //当前时间轮中的任务总数
-    private AtomicLong taskCounter;
-    //全局共用，存放时间轮的队列
-    private DelayQueue delayQueue;
 
-    //当前时间的总延迟时间 tickMs * wheelSize
+    /**
+     * 时间跨度
+     */
     private long interval;
-    //时间轮的指针
-    private long currentTime;
-    //对应当前时间轮，长度就是 wheelSize ，每一项 都对应时间轮中的一个时间格
-    private TimerTaskList[] buckets = new TimerTaskList[wheelSize];
-    //上层时间轮的引用
-    private TimingWheel overflowWheel;
 
-    public TimingWheel(long tickMs, int wheelSize, long startMs, AtomicLong taskCounter, DelayQueue delayQueue) {
+    /**
+     * 时间槽
+     */
+    private TimerTaskList[] timerTaskLists;
+
+    /**
+     * 当前时间
+     */
+    private long currentTime;
+
+    /**
+     * 上层时间轮
+     */
+    private volatile TimingWheel overflowWheel;
+
+    /**
+     * 一个Timer只有一个delayQueue
+     */
+    private DelayQueue<TimerTaskList> delayQueue;
+
+    public TimingWheel(long tickMs, int wheelSize, long currentTime, DelayQueue<TimerTaskList> delayQueue) {
+        this.currentTime = currentTime;
         this.tickMs = tickMs;
         this.wheelSize = wheelSize;
-        this.startMs = startMs;
-        this.taskCounter = taskCounter;
-        this.delayQueue = delayQueue;
         this.interval = tickMs * wheelSize;
-        this.currentTime = startMs - (startMs % tickMs);
-    }
-
-    /**
-     * 往当前时间轮添加任务
-     * @param timerTaskEntry
-     * @return
-     */
-    public boolean add(TimerTaskEntry timerTaskEntry){
-        long expiration = timerTaskEntry.getExpirationMs();
-        if (timerTaskEntry.cancelled())
-            return false;
-        if (expiration <  currentTime + tickMs)
-            return false;
-        if (expiration < currentTime + interval){
-            long virtualId = expiration / tickMs;
-            TimerTaskList bucket = buckets[(int) (virtualId % wheelSize)];
-            bucket.add(timerTaskEntry);
-            if(bucket.setExpiration(virtualId * tickMs)){
-                delayQueue.offer(bucket);
-            }
-        }else {
-            if (overflowWheel == null)
-                addOverFlowWheel();
-            return overflowWheel.add(timerTaskEntry);
+        this.timerTaskLists = new TimerTaskList[wheelSize];
+        //currentTime为tickMs的整数倍 这里做取整操作
+        this.currentTime = currentTime - (currentTime % tickMs);
+        this.delayQueue = delayQueue;
+        for (int i = 0; i < wheelSize; i++) {
+            timerTaskLists[i] = new TimerTaskList();
         }
-        return false;
     }
 
     /**
-     * 推进时间轮指针
-     * @param timeMs
+     * 创建或者获取上层时间轮
      */
-    public void advanceClock(long timeMs){
-        if(timeMs >= currentTime + timeMs)
-            currentTime = timeMs - (timeMs % tickMs);
-        if (overflowWheel != null)
-            overflowWheel.advanceClock(currentTime);
+    private TimingWheel getOverflowWheel() {
+        if (overflowWheel == null) {
+            synchronized (this) {
+                if (overflowWheel == null) {
+                    overflowWheel = new TimingWheel(interval, wheelSize, currentTime, delayQueue);
+                }
+            }
+        }
+        return overflowWheel;
     }
 
     /**
-     * 创建上层时间轮
+     * 添加任务到时间轮
      */
-    private void addOverFlowWheel(){
-        synchronized(this){
-            if (overflowWheel == null)
-                overflowWheel = new TimingWheel(interval,wheelSize,currentTime,taskCounter,delayQueue);
+    public boolean addTask(TimerTask timerTask) {
+        long expiration = timerTask.getDelayMs();
+        //过期任务直接执行
+        if (expiration < currentTime + tickMs) {
+            return false;
+        } else if (expiration < currentTime + interval) {
+            //当前时间轮可以容纳该任务 加入时间槽
+            Long virtualId = expiration / tickMs;
+            int index = (int) (virtualId % wheelSize);
+            System.out.println("tickMs:" + tickMs + "------index:" + index + "------expiration:" + expiration);
+            TimerTaskList timerTaskList = timerTaskLists[index];
+            timerTaskList.addTask(timerTask);
+            if (timerTaskList.setExpiration(virtualId * tickMs)) {
+                //添加到delayQueue中
+                delayQueue.offer(timerTaskList);
+            }
+        } else {
+            //放到上一层的时间轮
+            TimingWheel timeWheel = getOverflowWheel();
+            timeWheel.addTask(timerTask);
+        }
+        return true;
+    }
+
+    /**
+     * 推进时间
+     */
+    public void advanceClock(long timestamp) {
+        if (timestamp >= currentTime + tickMs) {
+            currentTime = timestamp - (timestamp % tickMs);
+            if (overflowWheel != null) {
+                //推进上层时间轮时间
+                this.getOverflowWheel().advanceClock(timestamp);
+            }
         }
     }
 }

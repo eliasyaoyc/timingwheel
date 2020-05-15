@@ -1,52 +1,26 @@
 package yychen.demo.timingwheel;
 
-import java.util.Arrays;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.CountDownLatch;
 
 public class Main {
+    static int executorCount = 0;
+    static int joinCount = 0;
 
-    public static void main(String[] args) {
-        DelayedOperationPurgatory purgatory = new DelayedOperationPurgatory();
-        MockDelayedOperation r1 = new MockDelayedOperation(10000L);
-        MockDelayedOperation r2 = new MockDelayedOperation(10000L);
-        purgatory.tryCompleteElseWatch(r1);
-        purgatory.tryCompleteElseWatch(r2);
-    }
-
-    static class MockDelayedOperation extends DelayedOperation {
-        private Long delayedMs;
-        private ReentrantLock lock;
-        private boolean completable = false;
-
-        public MockDelayedOperation(Long delayedMs) {
-            this.delayedMs = delayedMs;
+    public static void main(String[] args) throws InterruptedException {
+        CountDownLatch countDownLatch = new CountDownLatch(1000);
+        SystemTimer systemTimer = new SystemTimer();
+        for (int i = 1; i <= 1000; i++) {
+            TimerTask timerTask = new TimerTask(() -> {
+                countDownLatch.countDown();
+                executorCount++;
+                System.out.println(executorCount + "------------------ 开始执行");
+            }, i);
+            systemTimer.addTask(timerTask);
+            System.out.println(i + "---------------------------加入是时间轮");
+            joinCount++;
         }
-
-        @Override
-        Boolean tryComplete() {
-            if (completable)
-                forceComplete();
-            return false;
-        }
-
-        @Override
-        void onComplete() {
-
-        }
-
-        @Override
-        Boolean isCompleted() {
-            return completable;
-        }
-
-        @Override
-        Boolean maybeTryComplete() {
-            return null;
-        }
-
-        @Override
-        void cancel() {
-
-        }
+        countDownLatch.await();
+        System.out.println("executorCount:-----------" + executorCount);
+        System.out.println("joinCount:-----------" + joinCount);
     }
 }

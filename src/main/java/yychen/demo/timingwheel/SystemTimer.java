@@ -1,11 +1,6 @@
 package yychen.demo.timingwheel;
 
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * @Author: siran.yao
@@ -13,84 +8,65 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * 对时间轮的包装
  */
 public class SystemTimer {
-    private long startMs;
-    private DelayQueue<TimerTaskList> delayQueue = new DelayQueue();
-    private AtomicLong taskCounter = new AtomicLong(0);
-    private ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
-    private ReentrantReadWriteLock.WriteLock writeLock = readWriteLock.writeLock();
-    private ReentrantReadWriteLock.ReadLock readLock = readWriteLock.readLock();
-    private ThreadPoolExecutor taskExecutor = new ThreadPoolExecutor(
-            1,
-            1,
-            0L,
-            TimeUnit.MILLISECONDS,
-            new LinkedBlockingQueue<Runnable>());
-    private TimingWheel timingWheel = new TimingWheel(
-            1,
-            20,
-            LocalDateTime.now().toInstant(ZoneOffset.of("+8")).toEpochMilli(),
-            taskCounter,
-            delayQueue);
-
-    public void add(TimerTask timerTask){
-        readLock.lock();
-        try {
-            addTimerTaskEntry(new TimerTaskEntry(timerTask,
-                    timerTask.getDelayMs() + LocalDateTime.now().toInstant(ZoneOffset.of("+8")).toEpochMilli()));
-        }finally {
-            readLock.unlock();
-        }
-    }
-
-    private void addTimerTaskEntry(TimerTaskEntry timerTaskEntry){
-        //add failure
-        if(!timingWheel.add(timerTaskEntry)){
-            //whether cancelled or expired
-            if(!timerTaskEntry.cancelled())
-                taskExecutor.submit(timerTaskEntry.getTimerTask());
-        }
-    }
+    /**
+     * 底层时间轮
+     */
+    private TimingWheel timeWheel;
 
     /**
-     * advance timing-wheel
+     * 一个Timer只有一个delayQueue
      */
-    public boolean advanceClock(long timeoutMs){
-        try {
-            TimerTaskList bucket = delayQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
-            if (bucket != null){
-                writeLock.lock();
-                while (bucket != null){
-                    timingWheel.advanceClock(bucket.getExpiration().longValue());
-                    bucket.flush();
-                    bucket = delayQueue.poll();
-                }
-            }else{
-                return false;
+    private DelayQueue<TimerTaskList> delayQueue = new DelayQueue<>();
+
+    /**
+     * 过期任务执行线程
+     */
+    private ExecutorService workerThreadPool;
+
+    /**
+     * 轮询delayQueue获取过期任务线程
+     */
+    private ExecutorService bossThreadPool;
+
+    /**
+     * 构造函数
+     */
+    public SystemTimer() {
+        timeWheel = new TimingWheel(1, 20, System.currentTimeMillis(), delayQueue);
+        workerThreadPool = Executors.newFixedThreadPool(100);
+        bossThreadPool = Executors.newFixedThreadPool(1);
+        //20ms获取一次过期任务
+        bossThreadPool.submit(() -> {
+            while (true) {
+                this.advanceClock(20);
             }
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }finally {
-            writeLock.unlock();
+        });
+    }
+
+    /**
+     * 添加任务
+     */
+    public void addTask(TimerTask timerTask) {
+        //添加失败任务直接执行
+        if (!timeWheel.addTask(timerTask)) {
+            workerThreadPool.submit(timerTask.getTask());
         }
-        return true;
     }
 
     /**
-     * get current task number
-     * @return
+     * 获取过期任务
      */
-    public long taskCounter(){
-        return taskCounter.get();
-    }
-
-    /**
-     * stop the thread pool, avoid memory leak
-     */
-    public void shutdown(){
-        taskExecutor.shutdown();
-    }
-
-    public TimingWheel getTimingWheel() {
-        return timingWheel;
+    private void advanceClock(long timeout) {
+        try {
+            TimerTaskList timerTaskList = delayQueue.poll(timeout, TimeUnit.MILLISECONDS);
+            if (timerTaskList != null) {
+                //推进时间
+                timeWheel.advanceClock(timerTaskList.getExpiration());
+                //执行过期任务（包含降级操作）
+                timerTaskList.flush(this::addTask);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }

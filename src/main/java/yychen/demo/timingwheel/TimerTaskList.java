@@ -2,72 +2,97 @@ package yychen.demo.timingwheel;
 
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * @Author: siran.yao
  * @time: 2020/5/8:上午11:13
  */
 public class TimerTaskList implements Delayed {
-    private AtomicInteger taskCounter = new AtomicInteger(0);
+    /**
+     * 过期时间
+     */
     private AtomicLong expiration = new AtomicLong(-1L);
-    private TimerTaskEntry root = new TimerTaskEntry(null,-1);
 
-    public TimerTaskList() {
+    /**
+     * 根节点
+     */
+    private TimerTask root = new TimerTask( null,-1L);
+
+    {
         root.prev = root;
         root.next = root;
     }
 
-    public boolean setExpiration(long expiration) {
-        return this.expiration.getAndSet(expiration) != expiration;
+    /**
+     * 设置过期时间
+     */
+    public boolean setExpiration(long expire) {
+        return expiration.getAndSet(expire) != expire;
     }
 
-    public AtomicLong getExpiration() {
-        return expiration;
+    /**
+     * 获取过期时间
+     */
+    public long getExpiration() {
+        return expiration.get();
     }
 
-    //add a timer task entry to this list
-    public void add(TimerTaskEntry timerTaskEntry) {
-        boolean done = false;
-        while (!done){
-            timerTaskEntry.remove();
-            synchronized (timerTaskEntry){
-                if(timerTaskEntry.list == null){
-                    TimerTaskEntry tail = root.prev;
-                    timerTaskEntry.next = root;
-                    timerTaskEntry.prev = tail;
-                    timerTaskEntry.list = this;
-                    tail.next = timerTaskEntry;
-                    root.prev = timerTaskEntry;
-                    taskCounter.incrementAndGet();
-                    done = true;
-                }
+    /**
+     * 新增任务
+     */
+    public void addTask(TimerTask timerTask) {
+        synchronized (this) {
+            if (timerTask.timerTaskList == null) {
+                timerTask.timerTaskList = this;
+                TimerTask tail = root.prev;
+                timerTask.next = root;
+                timerTask.prev = tail;
+                tail.next = timerTask;
+                root.prev = timerTask;
             }
         }
     }
 
-    public void remove(TimerTaskEntry timerTaskEntry){
-        synchronized (timerTaskEntry){
-            if (timerTaskEntry.list.equals(this)){
-                timerTaskEntry.next.prev = timerTaskEntry.prev;
-                timerTaskEntry.prev.next = timerTaskEntry.next;
-                timerTaskEntry.next = null;
-                timerTaskEntry.prev = null;
-                timerTaskEntry.list = null;
-                taskCounter.decrementAndGet();
+    /**
+     * 移除任务
+     */
+    public void removeTask(TimerTask timerTask) {
+        synchronized (this) {
+            if (timerTask.timerTaskList.equals(this)) {
+                timerTask.next.prev = timerTask.prev;
+                timerTask.prev.next = timerTask.next;
+                timerTask.timerTaskList = null;
+                timerTask.next = null;
+                timerTask.prev = null;
             }
         }
     }
 
+    /**
+     * 重新分配
+     */
+    public synchronized void flush(Consumer<TimerTask> flush) {
+        TimerTask timerTask = root.next;
+        while (!timerTask.equals(root)) {
+            this.removeTask(timerTask);
+            flush.accept(timerTask);
+            timerTask = root.next;
+        }
+        expiration.set(-1L);
+    }
+
+    @Override
     public long getDelay(TimeUnit unit) {
-        return 0;
+        return Math.max(0, unit.convert(expiration.get() - System.currentTimeMillis(), TimeUnit.MILLISECONDS));
     }
 
+    @Override
     public int compareTo(Delayed o) {
+        if (o instanceof TimerTaskList) {
+            return Long.compare(expiration.get(), ((TimerTaskList) o).expiration.get());
+        }
         return 0;
-    }
-
-    public void flush() {
     }
 }
